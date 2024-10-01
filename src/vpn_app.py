@@ -1,5 +1,4 @@
 from gi.repository import Gtk, GLib
-import sqlite3
 import os
 import tempfile
 import subprocess
@@ -9,8 +8,7 @@ from pyzbar.pyzbar import decode
 from PIL import Image
 
 from src.new_config_dialog import NewConfigDialog
-
-DATABASE = 'vpn_configs.db'
+import src.database as database
 
 
 class VPNApp(Gtk.Window):
@@ -20,7 +18,7 @@ class VPNApp(Gtk.Window):
         self.set_default_size(600, 400)
 
         # Initialize database
-        self.init_db()
+        database.init_db()
 
         # Main layout
         vbox = Gtk.VBox(spacing=6)
@@ -66,27 +64,11 @@ class VPNApp(Gtk.Window):
         # Set up a timer to periodically update the status
         GLib.timeout_add_seconds(5, self.update_status)
 
-    def init_db(self):
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS vpn_configs
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      name TEXT,
-                      username TEXT,
-                      password TEXT,
-                      qr_code_path TEXT,
-                      ovpn_config_path TEXT)''')
-        conn.commit()
-        conn.close()
-
     def load_configs(self):
         self.store.clear()
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute("SELECT id, name FROM vpn_configs")
-        for row in c.fetchall():
-            self.store.append(row)
-        conn.close()
+        vpns = database.get_vpns()
+        for vpn in vpns:
+            self.store.append(vpn)
 
     def on_new_clicked(self, widget):
         dialog = NewConfigDialog(self)
@@ -94,12 +76,7 @@ class VPNApp(Gtk.Window):
 
         if response == Gtk.ResponseType.OK:
             data = dialog.get_data()
-            conn = sqlite3.connect(DATABASE)
-            c = conn.cursor()
-            c.execute("INSERT INTO vpn_configs (name, username, password, qr_code_path, ovpn_config_path) VALUES (?, ?, ?, ?, ?)",
-                      (data['name'], data['username'], data['password'], data['qr_code_path'], data['ovpn_config_path']))
-            conn.commit()
-            conn.close()
+            database.create_vpn(data)
             self.load_configs()
 
         dialog.destroy()
@@ -109,11 +86,7 @@ class VPNApp(Gtk.Window):
         model, treeiter = selection.get_selected()
         if treeiter is not None:
             vpn_id = model[treeiter][0]
-            conn = sqlite3.connect(DATABASE)
-            c = conn.cursor()
-            c.execute("DELETE FROM vpn_configs WHERE id = ?", (vpn_id,))
-            conn.commit()
-            conn.close()
+            database.delete_vpn(vpn_id)
             self.load_configs()
 
     def on_connect_clicked(self, widget):
@@ -127,14 +100,7 @@ class VPNApp(Gtk.Window):
             self.show_message("No Selection", "Please select a VPN configuration.")
             return
 
-        vpn_id = model[treeiter][0]
-
-        # Get VPN configuration
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute("SELECT name, username, password, qr_code_path, ovpn_config_path FROM vpn_configs WHERE id = ?", (vpn_id,))
-        vpn = c.fetchone()
-        conn.close()
+        vpn = database.get_vpn(model[treeiter][0])
 
         if vpn is None:
             self.show_message("Error", "VPN configuration not found.")
