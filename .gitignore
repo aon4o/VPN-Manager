@@ -1,0 +1,6 @@
+.idea
+.venv
+.vscode
+
+vpn_configs.db
+vpn_configs

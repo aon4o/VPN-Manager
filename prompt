@@ -1,0 +1,206 @@
+i want to build a little native linux app with python and GTK. I need it to have a list with vpn connections that are user made and are empty by deafult. That should be the homescreen. There should be an option to delete an existing vpn configuration and to create a new one. The creation form must support display name of the conn, username, password, qr code as a png image file upload and a .ovpn config file also as a file upload. The files must be stored only locally. The other data must be stored also. If its easy they should be stored in a sqlite db file. If its not easy store them in a file. The default screen must list the connection names and then 2 action btns. The first for connection to the wpn with the given config, and the second for deleting it. On the homepage there msut be also a status of the vpn (Connected/Disconnected). If there is already a connection the connect buttons mustn't try to connect again. When needed a password should be requested dinamically from the user. Sudoers MUST NOT be updated by the user for the application to work. When connecting to the vpn the app must read the qr code and generate an one time password. This password must be used by the expect script when prompted for challange.
+
+This is a VPN helper written in php that is tested by me and works. If it can help use it as an inspiration.
+
+<?php
+
+declare(strict_types=1);
+
+namespace App\Helpers;
+
+use App\Models\Configuration;
+use Exception;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Native\Laravel\Facades\Notification;
+use Symfony\Component\Process\Process;
+
+class VPN
+{
+    private const PID_FILE = '/tmp/delta-vpn.pid';
+
+    /**
+     * @param  Configuration  $configuration
+     *
+     * @return bool
+     */
+    public static function connect(Configuration $configuration): bool
+    {
+        if (VPN::isConnected()) {
+            Notification::new()
+                ->title('VPN Already Connected')
+                ->message('VPN is already connected. Please disconnect first.')
+                ->show();
+            Log::error('VPN is already connected. Please disconnect first.');
+            return false;
+        }
+
+        $auth_file = tempnam(sys_get_temp_dir(), 'vpn-auth');
+        file_put_contents($auth_file, "$configuration->username\n$configuration->password\n");
+        chmod($auth_file, 0600);
+
+        $ovpn_config = Storage::disk('ovpn_configs')->path($configuration->ovpn_config);
+        $expect_script = VPN::generateExpectScript($ovpn_config, $auth_file, $configuration->otp);
+
+        try {
+            $process = new Process(['expect', $expect_script]);
+            $process->setTimeout(null);
+            $process->start();
+
+            sleep(10);
+
+            if (VPN::isConnected()) {
+                Notification::new()
+                    ->title('VPN Connected')
+                    ->message('VPN connection established successfully.')
+                    ->show();
+                Log::info('VPN connection established successfully.', [
+                    'output' => $process->getOutput(),
+                    'error_output' => $process->getErrorOutput(),
+                ]);
+                return true;
+            } else {
+                Notification::new()
+                    ->title('VPN Connection Failed')
+                    ->message('VPN connection failed to establish.')
+                    ->show();
+
+                Log::error('VPN connection failed to establish.', [
+                    'output' => $process->getOutput(),
+                    'error_output' => $process->getErrorOutput(),
+                ]);
+                return false;
+            }
+        } catch (Exception $exception) {
+            Notification::new()
+                ->title('VPN Connection Error')
+                ->message('Error during VPN connection: ' . $exception->getMessage())
+                ->show();
+            Log::error('Error during VPN connection: ' . $exception->getMessage(), [
+                'output' => $process?->getOutput() ?? null,
+                'error_output' => $process?->getErrorOutput() ?? null,
+            ]);
+            return false;
+        } finally {
+            unlink($auth_file);
+            unlink($expect_script);
+        }
+    }
+
+    /**
+     * @return bool
+     */
+    public static function disconnect(): bool
+    {
+        if (! VPN::isConnected()) {
+            Notification::new()
+                ->title('VPN Not Connected')
+                ->message('VPN is not connected.')
+                ->show();
+            Log::error('VPN is not connected.');
+            return false;
+        }
+
+        $pid = @file_get_contents(self::PID_FILE);
+        if ($pid === false) {
+            Notification::new()
+                ->title('VPN Disconnect Error')
+                ->message('PID file not found.')
+                ->show();
+            Log::error('PID file not found.');
+            return false;
+        }
+
+        $pid = (int) trim($pid);
+
+        try {
+            // Use pkexec to kill the process as root
+            $process = new Process(['pkexec', 'kill', (string)$pid]);
+            $process->setTimeout(null);
+            $process->run();
+
+            if ($process->isSuccessful()) {
+                sleep(5);
+
+                if (! VPN::isConnected()) {
+                    Notification::new()
+                        ->title('VPN Disconnected')
+                        ->message('VPN disconnected successfully.')
+                        ->show();
+                    Log::info('VPN disconnected successfully.');
+                    return true;
+                } else {
+                    Notification::new()
+                        ->title('VPN Disconnect Failed')
+                        ->message('VPN failed to disconnect.')
+                        ->show();
+                    Log::error('VPN failed to disconnect.');
+                    return false;
+                }
+            } else {
+                throw new Exception('Failed to kill VPN process: ' . $process->getErrorOutput());
+            }
+        } catch (Exception $exception) {
+            Notification::new()
+                ->title('VPN Disconnect Error')
+                ->message('Error during VPN disconnection: ' . $exception->getMessage())
+                ->show();
+            Log::error('Error during VPN disconnection: ' . $exception->getMessage());
+            return false;
+        } finally {
+            if (file_exists(self::PID_FILE)) {
+                unlink(self::PID_FILE);
+            }
+        }
+    }
+
+    /**
+     * Checks if there is currently an active VPN connection.
+     *
+     * @return bool
+     */
+    public static function isConnected(): bool
+    {
+        $process = new Process(['ip', 'addr', 'show', 'dev', 'tun0']);
+        $process->run();
+
+        return $process->isSuccessful();
+    }
+
+    private static function generateExpectScript(string $ovpn_config, string $auth_file, string $otp): string
+    {
+        $pid_file = self::PID_FILE;
+
+        $script = <<<EOF
+#!/usr/bin/expect -f
+set timeout -1
+
+# Start OpenVPN with pkexec and disassociate it from the parent process
+spawn pkexec /bin/sh -c "openvpn --writepid '$pid_file' --config '$ovpn_config' --auth-user-pass '$auth_file' --daemon"
+
+expect {
+    "CHALLENGE:" {
+        send "$otp\r"
+        exp_continue
+    }
+    eof {
+        exit 0
+    }
+    timeout {
+        exit 1
+    }
+}
+EOF;
+
+        $script_path = tempnam(sys_get_temp_dir(), 'expect');
+        file_put_contents($script_path, $script);
+        chmod($script_path, 0700);
+
+        return $script_path;
+    }
+}
+
+
+You may be able to use the expect script in that php code. It was hard for writing so I think it may be best just to use it as is.
+
+Give me the answer in ONE code block.

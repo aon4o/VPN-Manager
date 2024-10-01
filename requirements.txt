@@ -1,0 +1,4 @@
+pygobject~=3.50.0
+pyotp~=2.9.0
+pyzbar~=0.1.9
+pillow~=10.4.0
