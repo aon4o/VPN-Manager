@@ -2,5 +2,9 @@
 .venv
 .vscode
 
+build
+dist
+main.spec
+
 vpn_configs.db
 vpn_configs

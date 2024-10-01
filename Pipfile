@@ -8,6 +8,7 @@ pygobject = "*"
 pyotp = "*"
 pyzbar = "*"
 pillow = "*"
+pyinstaller = "*"
 
 [dev-packages]
 
